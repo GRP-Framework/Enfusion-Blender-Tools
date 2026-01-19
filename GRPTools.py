@@ -622,8 +622,23 @@ def _prepare_texture_data(image: bpy.types.Image, postfix: str, colorspace: str)
 
 def _get_or_create_packed_image(name: str, width: int, height: int, overwrite: bool) -> PackedResult:
     existing = bpy.data.images.get(name)
+    expected_len = int(width) * int(height) * 4
     if existing and not overwrite:
-        return PackedResult(existing, False)
+        try:
+            if int(existing.size[0]) != width or int(existing.size[1]) != height:
+                existing.scale(width, height)
+            existing.pixels[0:1]
+            if len(existing.pixels) != expected_len:
+                bpy.data.images.remove(existing)
+                existing = None
+        except Exception:
+            try:
+                bpy.data.images.remove(existing)
+            except Exception:
+                pass
+            existing = None
+        if existing:
+            return PackedResult(existing, False)
     if existing:
         bpy.data.images.remove(existing)
 
@@ -674,13 +689,19 @@ def _resolve_unpacked_dir() -> Tuple[Path, bool]:
 def _pack_bcr(material: bpy.types.Material, textures: Dict[str, Optional[bpy.types.Image]], settings, progress: Optional[ProgressReporter] = None) -> PackedResult:
     base_reference = textures.get("base_color") or _pick_reference_image(textures)
     base_name = _base_name_from_image(material, textures.get("base_color") or base_reference)
+    repack_requested = False
     existing_bcr = textures.get("bcr")
-    if existing_bcr and not _should_repack_bcr(existing_bcr, textures.get("base_color") or base_reference, settings):
-        return PackedResult(existing_bcr, False)
+    if existing_bcr:
+        repack_requested = _should_repack_bcr(existing_bcr, textures.get("base_color") or base_reference, settings)
+        if not repack_requested:
+            return PackedResult(existing_bcr, False)
 
     existing_bcr = _find_existing_packed_image(base_reference, base_name, "_BCR")
-    if existing_bcr and not _should_repack_bcr(existing_bcr, textures.get("base_color") or base_reference, settings):
-        return PackedResult(existing_bcr, False)
+    if existing_bcr:
+        repack_disk = _should_repack_bcr(existing_bcr, textures.get("base_color") or base_reference, settings)
+        if not repack_disk:
+            return PackedResult(existing_bcr, False)
+        repack_requested = repack_requested or repack_disk
 
     if not settings.pack_textures:
         return PackedResult(textures.get("base_color"), False)
@@ -702,6 +723,8 @@ def _pack_bcr(material: bpy.types.Material, textures: Dict[str, Optional[bpy.typ
     if textures.get("orm"):
         _ensure_colorspace(textures["orm"], "Non-Color")
 
+    base_color_image = textures.get("base_color")
+    base_color_is_data = _is_data_colorspace(base_color_image)
     base_color_sampler = ImageSampler(textures.get("base_color"))
     roughness_sampler = ImageSampler(textures.get("roughness"))
     orm_sampler = ImageSampler(textures.get("orm"))
@@ -724,6 +747,8 @@ def _pack_bcr(material: bpy.types.Material, textures: Dict[str, Optional[bpy.typ
                 roughness = textures.get("roughness_value") if textures.get("roughness_value") is not None else DEFAULT_ROUGHNESS
 
             rgb = (base_rgba[0], base_rgba[1], base_rgba[2])
+            if base_color_image and not base_color_is_data:
+                rgb = _linear_to_srgb(rgb)
 
             pixels[idx] = rgb[0]
             pixels[idx + 1] = rgb[1]
@@ -747,7 +772,7 @@ def _pack_bcr(material: bpy.types.Material, textures: Dict[str, Optional[bpy.typ
         filepath = _build_output_paths(output_dir, base_name, "_BCR")
         packed.image.filepath_raw = str(filepath)
         packed.image.file_format = "TIFF"
-        if settings.overwrite_packed or not filepath.exists():
+        if settings.overwrite_packed or repack_requested or packed.created or not filepath.exists():
             packed.image.save()
 
     return packed
@@ -756,13 +781,19 @@ def _pack_bcr(material: bpy.types.Material, textures: Dict[str, Optional[bpy.typ
 def _pack_nmo(material: bpy.types.Material, textures: Dict[str, Optional[bpy.types.Image]], settings, progress: Optional[ProgressReporter] = None) -> PackedResult:
     normal_reference = textures.get("normal") or _pick_reference_image(textures)
     base_name = _base_name_from_image(material, textures.get("normal") or normal_reference)
+    repack_requested = False
     existing_nmo = textures.get("nmo")
-    if existing_nmo and not _should_repack_nmo(existing_nmo, textures, settings):
-        return PackedResult(existing_nmo, False)
+    if existing_nmo:
+        repack_requested = _should_repack_nmo(existing_nmo, textures, settings)
+        if not repack_requested:
+            return PackedResult(existing_nmo, False)
 
     existing_nmo = _find_existing_packed_image(normal_reference, base_name, "_NMO")
-    if existing_nmo and not _should_repack_nmo(existing_nmo, textures, settings):
-        return PackedResult(existing_nmo, False)
+    if existing_nmo:
+        repack_disk = _should_repack_nmo(existing_nmo, textures, settings)
+        if not repack_disk:
+            return PackedResult(existing_nmo, False)
+        repack_requested = repack_requested or repack_disk
 
     if not settings.pack_textures:
         return PackedResult(textures.get("normal"), False)
@@ -840,7 +871,7 @@ def _pack_nmo(material: bpy.types.Material, textures: Dict[str, Optional[bpy.typ
         filepath = _build_output_paths(output_dir, base_name, "_NMO")
         packed.image.filepath_raw = str(filepath)
         packed.image.file_format = "TIFF"
-        if settings.overwrite_packed or not filepath.exists():
+        if settings.overwrite_packed or repack_requested or packed.created or not filepath.exists():
             packed.image.save()
 
     return packed
